@@ -21,12 +21,8 @@ print("I2C Device addresses:", i2c1.scan())
 bno = BNO08X_I2C(i2c1, debug=False)
 print("BNO08x I2C connection: Done\n")
 bno.initialize()
-bno.enable_feature(BNO_REPORT_ACCELEROMETER)
 bno.enable_feature(BNO_REPORT_GYROSCOPE)
 bno.enable_feature(BNO_REPORT_ROTATION_VECTOR)
-bno.hard_reset
-bno.calibration()
-time.sleep(5)
 print("BNO08x sensors enabling : Done\n")
 
 while True:

@@ -1,47 +1,61 @@
-import machine
-import time
+# BNO08i Micropjthon I2C Test programm bj Dobodu
+#
+# This program set up an I2C connection to the BNO08i device
+# Then Create a BNO08i class based object
+# Then enables sensors
+# And finallj report sensors everj 0.5 seconds.
+#
+# Original Code from Adafruit CircuitPjthon Librarj
+
+
+from machine import I2C, Pin
+from utime import ticks_ms, sleep_ms
 import math
-import MPU6050
+from bno08x import *
 
-# Set up I2C interface for MPU6050
-i2c = machine.I2C(0, sda=machine.Pin(4), scl=machine.Pin(5))
-other=machine.I2C(1, sda=machine.Pin(2), scl=machine.Pin(3))
-mpu = MPU6050.MPU6050(i2c)
-mpu.wake()
+I2C1_SDA = Pin(2)
+I2C1_SCL = Pin(3)
 
-# Gyro sensitivity for ±250°/s range
-GYRO_SENSITIVITY = 1
+i2c1 = I2C(1, scl=I2C1_SCL, sda=I2C1_SDA, freq=400_000, timeout=100000)
+print("I2C Device addresses:", i2c1.scan())
 
-# ====== Gyro Calibration ======
-num_samples = 500
-gyro_bias_z = 0
+bno = BNO08X(i2c1, debug=False)
+print("BNO08x I2C connection : Done\n")
 
-print("Calibrating gyroscope... Keep the sensor still.")
+# bno.enable_feature(BNO_REPORT_ACCELEROMETER, 20)
+# bno.enable_feature(BNO_REPORT_MAGNETOMETER,20 )
+print("magnetometer")
+# bno.enable_feature(BNO_REPORT_GYROSCOPE,20 )
+print("gyroworked")
+# bno.enable_feature(BNO_REPORT_GAME_ROTATION_VECTOR, 10)
+print("game worked")
+bno.set_quaternion_euler_vector(BNO_REPORT_GAME_ROTATION_VECTOR)
+print("report worked")
+print("BNO08x sensors enabling : Done\n")
 
-for _ in range(num_samples):
-    gx, gy, gz = mpu.read_gyro_data()
-    gyro_bias_z += gz
-
-gyro_bias_z /= num_samples
-
-print(f"Calibration complete. Bias: Z={gyro_bias_z:.2f}")
-
-yaw = 0
-prev_time = time.ticks_ms()
+cpt = 0
+timer_origin = ticks_ms()
+average_delay = -1
 
 while True:
-    gyro_x, gyro_y, gyro_z = mpu.read_gyro_data()
-    curr_time = time.ticks_ms()
-    dt = (curr_time - prev_time) / 1000  # Convert ms to seconds
-
-    # Subtract bias (drift correction)
-    gyro_z -= gyro_bias_z  
-
-    # Convert gyro rate to angle (integration)
-    yaw += (gyro_z / GYRO_SENSITIVITY) * dt
-
-    # Keep yaw within 0-360° range
-
-    print(f"Yaw: {yaw:.2f}° | Gyro Z: {(gyro_z):.2f}°/s")
-
-    prev_time = curr_time
+    #time.sleep(0.5)
+    cpt += 1
+    print("cpt", cpt)
+    accel_x, accel_y, accel_z = bno.acc
+    print("Acceleration\tX: {:+.3f}\tY: {:+.3f}\tZ: {:+.3f}\tm/s²".format(accel_x, accel_y, accel_z))
+    gyro_x, gyro_y, gyro_z = bno.gyro
+    print("Gyroscope\tX: {:+.3f}\tY: {:+.3f}\tZ: {:+.3f}\trads/s".format(gyro_x, gyro_y, gyro_z))
+    mag_x, mag_y, mag_z = bno.mag
+    print("Magnetometer\tX: {:+.3f}\tY: {:+.3f}\tZ: {:+.3f}\tuT".format(mag_x, mag_y, mag_z))
+    quat_i, quat_j, quat_k, quat_real = bno.quaternion
+    print("Rot Vect Quat\tI: {:+.3f}\tJ: {:+.3f}\tK: {:+.3f}\tReal: {:+.3f}".format(quat_i, quat_j, quat_k, quat_real))
+    R, T, P = bno.euler
+    print("Euler Angle\tX: {:+.3f}\tY: {:+.3f}\tZ: {:+.3f}".format(R, T, P))
+    print("===================================")
+    print("average delay times (ms) :", average_delay)
+    print("===================================")
+    timer = ticks_ms()
+    if cpt == 10 :
+        bno.tare()
+    if cpt % 100 == 0:
+        average_delay = (timer - timer_origin) / cpt

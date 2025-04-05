@@ -17,18 +17,42 @@ def r():
     global turns
     turns += 1
 
-f(8.5)
+f(5)
+l()
+f(2)
+b(2)
+l()
+f(2)
+l()
+f(2)
+l()
+f(2)
 r()
-f(4)
-r()
-f(8)
+f(2)
+l()
+f(2)
 r()
 f(2)
 r()
 f(6)
+b(6)
 r()
+f(6)
+b(4)
+l()
+f(2)
+r()
+f(2)
+l()
 f(2)
 r()
 f(4)
+r()
+f(4)
+
+
+
+
+
 print(f"Total distance of straight movements: {total_distance}")
 print(f"Number of turns: {turns}")
