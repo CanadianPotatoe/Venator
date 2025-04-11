@@ -2,7 +2,19 @@ from machine import Pin, PWM, I2C
 import time
 import math
 from array import array
-import rp2 
+import rp2
+from bno08x_i2c import *
+# Initialize I2C for IMU
+I2C1_SDA = Pin(2)
+I2C1_SCL = Pin(3)
+i2c1 = I2C(1, scl=I2C1_SCL, sda=I2C1_SDA, freq=100000, timeout=200000)
+# Initialize BNO08X sensor
+bno = BNO08X_I2C(i2c1, debug=False)
+bno.enable_feature(BNO_REPORT_ACCELEROMETER)
+bno.enable_feature(BNO_REPORT_GYROSCOPE)
+bno.enable_feature(BNO_REPORT_ROTATION_VECTOR)
+leda = Pin(1, Pin.OUT) 
+ledb = Pin(6, Pin.OUT) 
 class Encoder:
     def __init__(self, pin_x, pin_y, reverse=False, scale=1):
         self.reverse = reverse
@@ -59,20 +71,21 @@ pwm_a.init(freq=5000, duty_ns=5000) # type: ignore
 pwm_b.init(freq=5000, duty_ns=5000) # type: ignore
 
 # PID Parameters
-Kp_straight = 0.03
-Ki_straight = 0.0009
-Kd_straight = 0.2
+Kp_straight = 0.1
+Ki_straight = 0
+Kd_straight = 0.003
 
 Kp_distance = 0.00
 Ki_distance = 0.0
 Kd_distance = 0.002
-Kp_turn = 0.005
-Ki_turn = 0.00000
-Kd_turn = 0.0
-#Kp_time=0.1
 Kp_time=0.1
+
+
 deadband_distance = 50
-deadband_turn = 0
+deadband_turn_imu= 0.5
+
+
+Kp_imu_turn = 0.2
 
 # Push button on GPIO 22
 button = Pin(22, Pin.IN, Pin.PULL_UP)
@@ -81,7 +94,8 @@ straight_count=0
 turn_time = 2.6 # time for one turn (in seconds)
 straight_time = 0.93  # time for one straight at 50% speed (in seconds)
 min_speed=0.28
-max_turn_speed=0.32
+max_turn_speed=0.29
+max_turn_speed_b=0.32
 MIN_STALL_THRESHOLD = 1
 leda = Pin(1, Pin.OUT) 
 ledb = Pin(6, Pin.OUT) 
@@ -135,6 +149,7 @@ def l():
     global turn_count
     global min_speed
     global left
+    global target_yaw
     turn_count+=1
     last_encoder_a_position = 0
     last_encoder_b_position = 0
@@ -142,19 +157,26 @@ def l():
     encoder_b = Encoder(11,10)  
     stall_counter = 0
     recovery = 0
-    motor_a_target=math.pi*left/4
-    wheel_diameter=6
-    encoder_resolution=2400
-    wheel_circumference=math.pi*wheel_diameter
-    encoder_a_ticks=(motor_a_target/wheel_circumference)*encoder_resolution
-    turn_error=encoder_a_ticks-encoder_a.position()
     encoder_a.reset()
     encoder_b.reset()
-    while turn_error>deadband_turn:
-        encoder_a_dist=encoder_a.position()
-        turn_error=encoder_a_ticks-encoder_a_dist
-        P_straight = turn_error * Kp_turn
-        correction_turn = P_straight
+    target_yaw = normalize_angle(target_yaw+left_angle)
+    turn_error_imu = target_yaw - normalize_angle(bno.euler[2])
+    stall_counter = 0
+    recovery = 0
+
+    while abs(turn_error_imu) > deadband_turn_imu:
+        # Read IMU and Encoder
+        yaw = normalize_angle(bno.euler[2])
+        turn_error_imu= target_yaw - yaw
+        if turn_error_imu > 180:
+            turn_error_imu -= 360
+        elif turn_error_imu < -180:
+            turn_error_imu += 360
+
+        P_imu = turn_error_imu * Kp_imu_turn
+
+        correction_turn = P_imu
+
         speed_a = correction_turn
                 # Apply minimum limits to avoid stalling
         if abs(speed_a) > 0 and abs(speed_a) < min_speed:
@@ -164,15 +186,20 @@ def l():
         speed_a = max(min(speed_a, max_turn_speed), -max_turn_speed)
         set_motor_speed_a(speed_a)
         set_motor_speed_b(0)
-        #stall detection
+        print(f"speed:{speed_a}turn_error_imu:{turn_error_imu} ")
+        
+         #stall detection
         speed_a_encoder = encoder_a.position() 
         speed_b_encoder = encoder_b.position() 
+        last_encoder_a_position = 0
+        last_encoder_b_position = 0
         if abs(speed_a_encoder - last_encoder_a_position) < MIN_STALL_THRESHOLD: 	
             stall_counter += 1 
             if stall_counter > 10: 
                 min_speed += 0.001 # Increment minimum speed 
                 speed_a = min_speed if speed_a > 0 else -min_speed 
                 recovery += 1 
+                print(recovery) 
                 if recovery > 10: 
                     temp_speed_a=0.4 if speed_a > 0 else -0.4
                     set_motor_speed_a(temp_speed_a) # Apply a high temporary speed 
@@ -202,57 +229,71 @@ def l():
         # Update last known positions
         last_encoder_a_position = speed_a_encoder
         last_encoder_b_position = speed_b_encoder
-    time.sleep(0.5)
+    time.sleep(0.3)
 
 def r():
     set_motor_speed_a(0)
     set_motor_speed_b(0)
-    leda.value(1)  
-    ledb.value(0)
+    leda.value(0)  
+    ledb.value(1)
     global turn_count
     global min_speed
-    global right
+    global left
+    global target_yaw
     turn_count+=1
     last_encoder_a_position = 0
     last_encoder_b_position = 0
     encoder_a = Encoder(14,15)
-    encoder_b = Encoder(11,10) 
+    encoder_b = Encoder(11,10)  
     stall_counter = 0
     recovery = 0
-    motor_a_target=math.pi*right/4
-    wheel_diameter=6
-    encoder_resolution=2400
-    wheel_circumference=math.pi*wheel_diameter
-    encoder_a_ticks=(motor_a_target/wheel_circumference)*encoder_resolution
-    turn_error=encoder_a_ticks+encoder_b.position()
     encoder_a.reset()
-    encoder_b.reset() 
-    while turn_error>deadband_turn:
-        encoder_a_dist=-1*encoder_b.position()
-        turn_error=encoder_a_ticks-encoder_a_dist
-        P_straight = turn_error * Kp_turn
-        correction_turn = P_straight
-        speed_a = correction_turn
+    encoder_b.reset()
+    target_yaw = normalize_angle(target_yaw-right_angle)
+    turn_error_imu = target_yaw - normalize_angle(bno.euler[2])
+    stall_counter = 0
+    recovery = 0
+
+    while abs(turn_error_imu) > deadband_turn_imu:
+        # Read IMU and Encoder
+        yaw = normalize_angle(bno.euler[2])
+        turn_error_imu= target_yaw - yaw
+        if turn_error_imu > 180:
+            turn_error_imu -= 360
+        elif turn_error_imu < -180:
+            turn_error_imu += 360
+
+
+        P_imu = turn_error_imu * Kp_imu_turn
+
+        correction_turn = P_imu
+
+        speed_b = correction_turn
                 # Apply minimum limits to avoid stalling
-        if abs(speed_a) > 0 and abs(speed_a) < min_speed:
-            speed_a = min_speed if speed_a > 0 else -min_speed
+        if abs(speed_b) > 0 and abs(speed_b) < min_speed:
+            speed_b = min_speed if speed_b > 0 else -min_speed
 
         # Optionally clamp speeds to max limits
-        speed_a = max(min(speed_a, max_turn_speed), -max_turn_speed)
+        speed_b = max(min(speed_b, max_turn_speed_b), -max_turn_speed_b)
+        set_motor_speed_b(-speed_b)
         set_motor_speed_a(0)
-        set_motor_speed_b(speed_a)
-        #stall detection
+        print(f"speed:{speed_b}turn_error_imu:{turn_error_imu} ")
+        
+         #stall detection
         speed_a_encoder = encoder_a.position() 
         speed_b_encoder = encoder_b.position() 
-        if abs(speed_b_encoder - last_encoder_b_position) < MIN_STALL_THRESHOLD: 	
+        last_encoder_a_position = 0
+        last_encoder_b_position = 0
+        if abs(speed_a_encoder - last_encoder_a_position) < MIN_STALL_THRESHOLD: 	
             stall_counter += 1 
             if stall_counter > 10: 
                 min_speed += 0.001 # Increment minimum speed 
-                speed_a = min_speed if speed_a > 0 else -min_speed 
+                speed_b = min_speed if speed_b > 0 else -min_speed 
                 recovery += 1 
+                print(recovery) 
                 if recovery > 10: 
-                    temp_speed_a=0.4 if speed_a > 0 else -0.4
-                    set_motor_speed_b(temp_speed_a) # Apply a high temporary speed 
+                    temp_speed_b=0.4 if speed_b > 0 else -0.4
+                    set_motor_speed_b(temp_speed_b) # Apply a high temporary speed 
                     time.sleep(0.05) 
                     recovery = 0 # Reset recovery after applying high speed 
                 else: stall_counter = 0 
@@ -279,176 +320,112 @@ def r():
         # Update last known positions
         last_encoder_a_position = speed_a_encoder
         last_encoder_b_position = speed_b_encoder
-    time.sleep(0.5)
-
-import math
-import time
+    time.sleep(0.3)
 
 def f(segments):
-    global dist, straight_count, min_speed, deadband_distance, Kp_straight, Ki_straight, Kd_straight, motor_speed, prev_time
-
-    # --- Initialization & Encoder Setup ---
+    global dist,straight_count, min_speed, deadband_distance, Kp_straight, Ki_straight, Kd_straight, motor_speed, prev_time
     error_sum_straight = 0
     last_error_straight = 0
-    leda.value(0)
+    leda.value(0)  
     ledb.value(0)
     encoder_a = Encoder(14, 15)
-    encoder_b = Encoder(10, 11)
+    encoder_b= Encoder(10,11)
     encoder_a.reset()
     encoder_b.reset()
     last_encoder_a_position = 0
     last_encoder_b_position = 0
     stall_counter = 0
     recovery = 0
-
-    # --- Distance & Encoder Calculations ---
-    # Total distance (in cm) the robot needs to travel (modify as needed)
-    total_distance_cm = ((segments - 1) * dist) + 15.3  
-    # Convert total distance to meters for the trapezoidal profile
-    total_distance_m = total_distance_cm / 100.0
-    wheel_diameter = 6  # in cm
+    total_distance = ((segments-1) * dist) +15.3# Total distance in cm
+    wheel_diameter = 6
     encoder_resolution = 2400
-    wheel_circumference = math.pi * wheel_diameter  # in cm
-    encoder_distance = (total_distance_cm / wheel_circumference) * encoder_resolution
-
-    # --- Trapezoidal Profile Parameters ---
-    # Set maximum speed and acceleration (in m/s and m/s^2)
-    v_max = 1.0       # maximum speed (adjust as needed)
-    a_max = 0.5       # maximum acceleration (adjust as needed)
-    
-    # Calculate acceleration phase duration and distance
-    t_acc = v_max / a_max           # time to reach v_max
-    d_acc = 0.5 * a_max * t_acc**2    # distance during acceleration (in meters)
-    
-    # Determine if we have a trapezoidal or triangular profile
-    if total_distance_m < 2 * d_acc:
-        # Triangular profile: robot never reaches v_max.
-        t_acc = math.sqrt(total_distance_m / a_max)
-        v_peak = a_max * t_acc
-        t_cruise = 0
-    else:
-        # Trapezoidal profile
-        v_peak = v_max
-        d_cruise = total_distance_m - 2 * d_acc
-        t_cruise = d_cruise / v_max
-
-    # Total planned motion time (in seconds)
-    t_total = 2 * t_acc + t_cruise
-
-    # Record the start time for the trapezoidal profile
-    start_time = time.time()
-    prev_time = time.time_ns()
-
-    # --- Main Loop: Drive Until Destination ---
-    traveled_distance = (encoder_a.position() + encoder_b.position()) / 2
+    wheel_circumference = math.pi * wheel_diameter
+    encoder_distance = (total_distance / wheel_circumference) * encoder_resolution
+    traveled_distance = (encoder_a.position() + (encoder_b.position())) / 2
     distance_error = encoder_distance - traveled_distance
 
     while abs(distance_error) > deadband_distance:
-        # Update encoder readings and compute traveled distance
-        traveled_distance = (encoder_a.position() + encoder_b.position()) / 2
+        traveled_distance = (encoder_a.position() + (encoder_b.position())) / 2
         distance_error = encoder_distance - traveled_distance
-
-        # --- Trapezoidal Profile Calculation ---
-        time_elapsed = time.time() - start_time
-        if time_elapsed < t_acc:
-            # Acceleration phase: v = a_max * t
-            target_speed = a_max * time_elapsed
-        elif time_elapsed < (t_acc + t_cruise):
-            # Constant (cruise) phase: maintain peak speed
-            target_speed = v_peak
-        elif time_elapsed < t_total:
-            # Deceleration phase: v = v_peak - a_max * (t - (t_acc + t_cruise))
-            target_speed = v_peak - a_max * (time_elapsed - (t_acc + t_cruise))
-        else:
-            target_speed = 0
-        
-        # For this loop, we set the motor speed to the profile’s target
-        motor_speed = target_speed
-
-        # --- Straight-Line PID Correction ---
-        # Calculate difference between the two encoder readings for correction
+        segments_traveled = traveled_distance * (wheel_circumference / encoder_resolution) / 25
+        calculate_speed(segments_traveled)
+                # Calculate the error as the difference between the encoder positions
         straight_error = encoder_a.position() - encoder_b.position()
-        print("Straight error:", straight_error)
-        curr_time = time.time_ns()
-        passed_time = (curr_time - prev_time) / 1e9
-        prev_time = curr_time
-        
-        # PID components (using the straight error)
+        print(straight_error)
+        curr_time=time.time_ns()
+        passed_time=(curr_time-prev_time)/1e9
+        prev_time=curr_time
+        # Turn PID calculations
         P_straight = straight_error * Kp_straight
         I_straight = error_sum_straight * Ki_straight
-        D_straight = (straight_error - last_error_straight) * Kd_straight / passed_time if passed_time > 0 else 0
+        D_straight = (straight_error - last_error_straight) * Kd_straight/passed_time
         correction_straight = P_straight + I_straight + D_straight
-        
-        # Update error sums for the integral term and last error for derivative term
-        error_sum_straight += straight_error
-        last_error_straight = straight_error
-
-        # Adjust individual motor speeds based on the PID correction
-        speed_a = motor_speed - correction_straight
+        # Calculate motor speeds based on correction
+        speed_a = motor_speed 
         speed_b = motor_speed + correction_straight
-
-        # Apply minimum speed limits to avoid stalling
+        # speed_b = -2.13414 * speed_b ** 3 + 3.74527 * speed_b ** 2 - 1.21031 * speed_b + 0.429783
+        last_error_straight = straight_error
+        # Apply minimum limits to avoid stalling
         if abs(speed_a) > 0 and abs(speed_a) < min_speed:
             speed_a = min_speed if speed_a > 0 else -min_speed
         if abs(speed_b) > 0 and abs(speed_b) < min_speed:
             speed_b = min_speed if speed_b > 0 else -min_speed
 
-        # Clamp speeds to maximum limits (assuming -1 to 1 scale)
+        # Optionally clamp speeds to max limits
         speed_a = max(min(speed_a, 1), -1)
         speed_b = max(min(speed_b, 1), -1)
-
-        # Send motor commands
         set_motor_speed_a(speed_a)
         set_motor_speed_b(speed_b)
         
-        # --- Stall Detection & Recovery ---
+        # Stall detection
         speed_a_encoder = encoder_a.position()
         speed_b_encoder = encoder_b.position()
-        if (abs(speed_a_encoder - last_encoder_a_position) < MIN_STALL_THRESHOLD and 
-            abs(speed_b_encoder - last_encoder_b_position) < MIN_STALL_THRESHOLD):
+
+        if abs(speed_a_encoder - last_encoder_a_position) < MIN_STALL_THRESHOLD and abs(speed_b_encoder - last_encoder_b_position) < MIN_STALL_THRESHOLD:
             stall_counter += 1
             if stall_counter > 10:
-                min_speed += 0.001  # Increment minimum speed to overcome stalling
+                min_speed += 0.001  # Increment minimum speed
                 speed_a = min_speed if speed_a > 0 else -min_speed
                 speed_b = min_speed if speed_b > 0 else -min_speed
                 recovery += 1
                 if recovery > 10:
-                    # Apply a high temporary speed for recovery
                     temp_speed_a = 0.4 if speed_a > 0 else -0.4
                     temp_speed_b = 0.4 if speed_b > 0 else -0.4
-                    set_motor_speed_a(temp_speed_a)
+                    set_motor_speed_a(temp_speed_a)  # Apply a high temporary speed
                     set_motor_speed_b(temp_speed_b)
                     time.sleep(0.05)
-                    recovery = 0  # Reset recovery counter after intervention
+                    recovery = 0  # Reset recovery after applying high speed
         else:
             stall_counter = 0
 
         last_encoder_a_position = speed_a_encoder
         last_encoder_b_position = speed_b_encoder
 
-        # (Optional: Include a short sleep if needed to pace your loop)
-        time.sleep(0.01)
 
-    # --- End-of-Motion Actions ---
     straight_count += segments
-    # Briefly reverse to stop
     set_motor_speed_a(-0.05)
     set_motor_speed_b(-0.05)
-    
-    # Wait until the robot comes to a complete stop
+    # Get initial encoder positions
     last_encoder_a_position = encoder_a.position()
     last_encoder_b_position = encoder_b.position()
+
+    # Wait until both encoders stop changing
     while True:
-        time.sleep(0.1)
+        time.sleep(0.1)  # Prevent excessive CPU usage
+        
         speed_a_encoder = encoder_a.position()
         speed_b_encoder = encoder_b.position()
+        
+        # Check if both encoders have stopped changing
         if speed_a_encoder == last_encoder_a_position and speed_b_encoder == last_encoder_b_position:
-            break
+            break  # Robot has stopped
+        
+        # Update last known positions
         last_encoder_a_position = speed_a_encoder
         last_encoder_b_position = speed_b_encoder
 
+    
     time.sleep(0.5)
-
 
 def b(segments):
     global dist,straight_count, min_speed, deadband_distance, Kp_straight, Ki_straight, Kd_straight, motor_speed, prev_time
@@ -486,10 +463,10 @@ def b(segments):
         # Turn PID calculations
         P_straight = straight_error * Kp_straight
         I_straight = error_sum_straight * Ki_straight
-        D_straight = (straight_error - last_error_straight) * Kd_straight/prev_time
+        D_straight = (straight_error - last_error_straight) * Kd_straight/passed_time
         correction_straight = P_straight + I_straight + D_straight
         # Calculate motor speeds based on correction
-        speed_a = motor_speed - correction_straight
+        speed_a = motor_speed 
         speed_b = motor_speed + correction_straight
         # speed_b = -2.13414 * speed_b ** 3 + 3.74527 * speed_b ** 2 - 1.21031 * speed_b + 0.429783
 
@@ -567,9 +544,9 @@ while True:
         ledb.value(0)
         target_time = 76
         turn_num = 14
-        straight_num = 57
-        left=29.5
-        right=29
+        straight_num = 41.5
+        left_angle=90
+        right_angle=90
         dist=25
         total_turn_time = turn_time * turn_num
         remaining_time = target_time - total_turn_time
@@ -578,13 +555,18 @@ while True:
         average_speed=0.5*(straight_time / time_per_straight)
         start_time=time.time_ns()
         prev_time=start_time
-
+        target_yaw = normalize_angle(bno.euler[2])
+        iyaw=target_yaw
+        print(iyaw)
         #enter path
-        f(5)
+        f(1.5)
         l()
         f(2)
-        b(2)
-        l()
+        r()
+        f(4)
+        r()
+        f(2)
+        r()
         f(2)
         l()
         f(2)
@@ -594,13 +576,8 @@ while True:
         f(2)
         l()
         f(2)
-        r()
-        f(2)
-        r()
-        f(6)
-        b(6)
-        r()
-        f(6)
+        l()
+        f(4)
         b(4)
         l()
         f(2)
@@ -627,4 +604,3 @@ while True:
     # Short delay to prevent button bouncing
     time.sleep(0.1)
 
-# This code is designed to control a robot using two motors and encoders. It includes functions for moving the robot forward, backward, and turning left or right. The robot uses PID control to adjust its speed and direction based on encoder feedback. The code also includes a button press event to trigger the robot's movement sequence.
